@@ -98,7 +98,7 @@ kbd,.kc{display:inline-flex;align-items:center;gap:4px;font:500 11.5px/1 var(--s
 #dev .ctl.rel .hl{stroke:var(--orange);stroke-dasharray:1.2 .8}
 #dev .ctl.latched .hl{stroke:var(--orange);stroke-width:.9}
 #dev .dome{transition:transform .26s cubic-bezier(.34,1.56,.64,1);transform-box:fill-box;transform-origin:center}
-#dev .ctl:hover .dome{transform:translateY(-.18px)}
+
 #dev .ctl.press .dome{transform:translateY(.5px) scale(.975);transition:transform .07s ease-out}
 @media (prefers-reduced-motion:reduce){#dev .dome,#dev .ctl.press .dome{transition:none}#dev .ctl:hover .dome{transform:none}}
 #dev .lrn{fill:var(--orange)}
@@ -225,6 +225,7 @@ details.item[open]>summary .t{font-weight:600}
 .results{max-width:860px;margin:18px auto 0}
 .card{border-top:1px solid var(--ink);padding:18px 0 22px}
 .card .q{font-weight:500;font-size:18px;margin:0 0 8px;letter-spacing:-.005em}
+.onote{margin:0 0 8px}.onote .ans{margin-top:4px}
 .card .sum{font-size:16px;max-width:64ch;margin:0 0 14px}
 .steps{list-style:none;margin:0 0 14px;padding:0;counter-reset:s}
 .steps li{display:grid;grid-template-columns:28px minmax(0,auto) minmax(0,1fr);gap:4px 12px;align-items:center;padding:9px 0;border-top:1px solid var(--hair)}
@@ -2555,7 +2556,7 @@ function tiltLoop(){
   var st=$("#stage"),svg=$("#dev");if(!st||!svg){TILT.run=false;return}
   var on=!fld.zoomed&&!walk&&state.tab==="field";if(!on){TILT.tx=0;TILT.ty=0}
   TILT.x+=(TILT.tx-TILT.x)*.09;TILT.y+=(TILT.ty-TILT.y)*.09;
-  svg.style.transform=Math.abs(TILT.x)+Math.abs(TILT.y)<.01?"":"perspective(1600px) rotateX("+TILT.x.toFixed(3)+"deg) rotateY("+TILT.y.toFixed(3)+"deg)";
+  svg.style.transform="";
   st.style.setProperty("--sx",TILT.sx.toFixed(1)+"%");st.style.setProperty("--sy",TILT.sy.toFixed(1)+"%");
   if(Math.abs(TILT.tx-TILT.x)>.004||Math.abs(TILT.ty-TILT.y)>.004)requestAnimationFrame(tiltLoop);else TILT.run=false;
 }
@@ -2687,7 +2688,7 @@ async function ask(q,opts){
     renderThread();return;
   }
   var ctx=retrieve(q,8);item.ctx=ctx.map(function(x){return x.n.id});
-  if(!sample){item.busy=false;item.offline=true;item.sum=ctx.length?"AI answers are off, so here are the closest notes. Turn them on in app settings (menu).":"No matching notes yet.";renderThread();return}
+  if(!sample){item.busy=false;item.offline=true;item.sum=ctx.length?"Here's what your notes say.":"Nothing in your notes matches this yet. Try other words, like the name of a key or a mode.";renderThread();return}
   state.busy=true;state.ctl=new AbortController();setBusy(true);renderThread();
   try{
     var res=await sample.json(buildPrompt(q,ctx),{cache:false,signal:state.ctl.signal});
@@ -2716,6 +2717,18 @@ function srcChips(ids){
 function stepsHTML(steps){
   return steps&&steps.length?'<ol class="steps">'+steps.map(function(s){return '<li><span class="sk">'+(s.keys.length?stepCaps(s.keys):"")+'</span><span class="st">'+inline(s.say)+'</span></li>'}).join("")+'</ol>':"";
 }
+function offlineNotes(ids){
+  var seen={},list=[];
+  var ord=ids.filter(function(id){return String(id).indexOf("ctl:")!==0}).concat(ids.filter(function(id){return String(id).indexOf("ctl:")===0}));
+  ord.forEach(function(id){var n=noteById(id);if(n&&!seen[id]&&list.length<3&&String(n.body||"").trim()){seen[id]=1;list.push(n)}});
+  return list.map(function(n,j){
+    var ctl=String(n.id).indexOf("ctl:")===0?[n.id.slice(4)]:(n.controls||[]);
+    ctl=ctl.filter(function(c){return state.controls[c]});
+    var inner='<div class="ans">'+md(n.body,[])+'</div>'+(ctl.length?'<div class="srcs"><span class="label" style="margin:0 4px 0 0">on the drawing</span>'+ctl.map(function(c){return '<button type="button" class="src" data-act="goctl" data-id="'+esc(c)+'">◎ '+esc(state.controls[c].name)+'</button>'}).join("")+'</div>':"");
+    return '<details class="item onote"'+(j===0?" open":"")+'><summary><span class="t">'+esc(n.title)+'</span></summary><div class="body">'+inner+'</div></details>';
+  }).join("")+(sample?"":'<p class="hint" style="margin:10px 0 0">'+esc(OFFLINE_HINT)+'</p>');
+}
+var OFFLINE_HINT="AI answers are off, so these are your notes as written. Turn on AI in app settings (menu) for written answers.";
 function renderThread(){
   var el=$("#thread"),keep={};if(!el)return;setTimeout(updateDone,0);
   el.querySelectorAll("textarea").forEach(function(t){keep[t.id]=t.value});
@@ -2730,6 +2743,7 @@ function renderThread(){
       if(it.recipe){body+=recipeCard(it.recipe,"t:"+i);if(it.steps.length&&!it.local)body+='<details class="item" style="margin-top:10px"><summary><span class="t">the steps in words</span></summary><div class="body">'+stepsHTML(it.steps)+'</div></details>'}
       else{body+=stepsHTML(it.steps);
       if((it.steps&&it.steps.some(function(s){return s.keys.length}))||it.screen)body+='<div class="row" style="margin:4px 0 6px"><button type="button" class="btn primary" data-act="showme" data-i="'+i+'">▶ show me on the device</button></div>';}
+      if(it.offline&&it.ctx&&it.ctx.length)body+=offlineNotes(it.ctx);
       if(it.tip)body+='<p class="tipline"><b>Tip:</b> '+inline(it.tip)+'</p>';
       var am=atlasMentions(it.q+" "+(it.sum||""));if(am.length)body+='<div class="aminis">'+am.map(atlasMini).join("")+'</div>';
       if(it.screen&&SCREENS[it.screen])body+='<details class="item" style="margin-top:12px"><summary><span class="t">the screen you\'ll use: '+esc(SCREENS[it.screen].title)+'</span></summary><div class="body">'+guidePage(it.screen,{screen:true,compact:true,kicker:"screen"})+'</div></details>';
@@ -2749,7 +2763,7 @@ function renderThread(){
     return '<article class="card'+ent+'"><p class="q">'+esc(it.q)+'</p>'+body+
       (it.gap?'<p class="gap-line">Not in your notes yet: '+esc(it.gap)+'</p>':"")+
       (it.error?'<p class="gap-line" style="color:var(--bad)">'+esc(it.error)+'</p>':"")+
-      (it.local?"":webBlock(it,i))+(!it.webOnly&&!it.busy&&!it.local?srcChips(it.used||it.ctx):"")+fb+'</article>';
+      (it.local?"":webBlock(it,i))+(!it.webOnly&&!it.busy&&!it.local&&!it.offline?srcChips(it.used||it.ctx):"")+fb+'</article>';
   }).join("");
   Object.keys(keep).forEach(function(id){var t=document.getElementById(id);if(t)t.value=keep[id]});
 }
@@ -2813,7 +2827,8 @@ function webBlock(it,i){
   if(r)return webCard(r);
   if(it.rid||it.webOnly)return '<div class="web"><p class="label">web search</p><p class="wait" style="margin:0">Request saved. Waiting for the search to start.</p></div>';
   if(it.busy||(!it.sum&&!it.offline&&!it.error))return "";
-  var weak=it.gap||it.offline||!(it.ctx&&it.ctx.length);
+  if(it.offline||!sample)return "";
+  var weak=it.gap||!(it.ctx&&it.ctx.length);
   if(!weak||it.repeat)return "";
   var msg=it.gap?"Your notes are missing part of this.":it.offline?"AI answers are off, so it couldn't write an answer.":"Nothing in your notes matches this.";
   return '<div class="callout"><p>'+esc(msg)+' Want me to look it up on the web?</p><button type="button" class="btn primary small" data-act="web" data-i="'+i+'">search the web for this</button></div>';
