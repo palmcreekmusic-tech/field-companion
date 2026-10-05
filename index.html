@@ -225,6 +225,7 @@ details.item[open]>summary .t{font-weight:600}
 .results{max-width:860px;margin:18px auto 0}
 .card{border-top:1px solid var(--ink);padding:18px 0 22px}
 .card .q{font-weight:500;font-size:18px;margin:0 0 8px;letter-spacing:-.005em}
+.qtools{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 14px}details.qtools{display:block}
 .onote{margin:0 0 8px}.onote .ans{margin-top:4px}
 .card .sum{font-size:16px;max-width:64ch;margin:0 0 14px}
 .steps{list-style:none;margin:0 0 14px;padding:0;counter-reset:s}
@@ -2854,10 +2855,41 @@ function webBlock(it,i){
 function renderWebs(){
   var attached={};state.thread.forEach(function(t){if(t.rid)attached[t.rid]=1});
   var rows=state.research.filter(function(r){return !attached[r.id]}).slice(0,20);
-  $("#webs").innerHTML=rows.length?'<p class="label">web searches</p>'+rows.map(function(r){
+  var oldTa=$("#imp-q"),keepV=oldTa?oldTa.value:"",keepOpen=!!(oldTa&&oldTa.closest("details")&&oldTa.closest("details").open),keepMsg=$("#imp-q-msg")?$("#imp-q-msg").textContent:"";
+  $("#webs").innerHTML=qTools()+(rows.length?'<p class="label">web searches</p>'+rows.map(function(r){
     var live=r.status==="pending"||r.status==="working";
     return '<details class="item" data-web="'+esc(r.id)+'"'+(state.earlierOpen["w"+r.id]||live?" open":"")+'><summary><span class="t">'+esc(r.q)+'</span><span class="badge'+(r.status==="failed"?" warn":r.status==="done"?" good":"")+'">'+(live?(mcp?"searching":"saved for later"):r.status==="done"?"answered":"failed")+'</span></summary><div class="body">'+webCard(r).replace('<div class="web">','<div>')+'</div></details>';
-  }).join(""):"";
+  }).join(""):"");
+  var nt=$("#imp-q");if(nt){nt.value=keepV;if(keepOpen)nt.closest("details").open=true;var nm=$("#imp-q-msg");if(nm)nm.textContent=keepMsg}
+}
+/* ---- questions travelling between the apps and the companion on claude.ai ---- */
+var QHEAD="OP1-FIELD-QUESTIONS v1";
+function unsentQs(){return state.research.filter(function(r){return r.status==="pending"&&!r.sentAt&&!r.fromApp})}
+function qTools(){
+  if(window.FC_STANDALONE){
+    var n=unsentQs().length;
+    return n?'<div class="qtools"><button type="button" class="btn small" data-act="sendq">send '+n+' unanswered question'+(n>1?"s":"")+' to Claude</button><span class="hint">Copies them so you can paste them into your companion on claude.ai. They join the weekly research.</span></div>':"";
+  }
+  return '<details class="item qtools"><summary><span class="t">add questions from your apps</span></summary><div class="body"><p class="hint" style="margin:0 0 8px">In the Mac or iPhone app, tap "send unanswered questions to Claude", then paste here.</p><textarea id="imp-q" rows="4" placeholder="'+QHEAD+'&#10;? how do I …" style="width:100%;font:inherit;font-size:14px;border:1px solid var(--line);border-radius:10px;padding:10px;box-sizing:border-box"></textarea><div class="row" style="margin-top:8px"><button type="button" class="btn small primary" data-act="importq">add to the weekly research</button><span class="hint" id="imp-q-msg"></span></div></div></details>';
+}
+async function sendQs(){
+  var rows=unsentQs();if(!rows.length)return;
+  var text=QHEAD+"\n"+rows.slice(0,30).map(function(r){return "? "+String(r.q).replace(/\s+/g," ").trim().slice(0,200)}).join("\n")+"\n";
+  var done=false;
+  try{if(navigator.share&&/iPhone|iPad|Android/i.test(navigator.userAgent)){await navigator.share({text:text});done=true}}catch(e){if(e&&e.name==="AbortError")return}
+  if(!done){try{await navigator.clipboard.writeText(text);done=true}catch(e){}}
+  if(!done){window.prompt("Copy these questions:",text);done=true}
+  for(var i=0;i<rows.length&&i<30;i++){try{await db.doc("research/"+rows[i].id).update({sentAt:now()})}catch(e){}}
+  toast("Copied. Paste them into your companion on claude.ai.");
+}
+async function importQs(){
+  var ta=$("#imp-q"),msg=$("#imp-q-msg");if(!ta||!db)return;
+  var txt=ta.value;if(txt.indexOf("OP1-FIELD-QUESTIONS")<0&&!/^\s*\?/m.test(txt)){msg.textContent="That doesn't look like a list of questions from the apps.";return}
+  var qs=txt.split(/\r?\n/).filter(function(l){return /^\s*\?\s*\S/.test(l)}).map(function(l){return l.replace(/^\s*\?\s*/,"").trim()}).slice(0,30);
+  var added=0,have={};state.research.forEach(function(r){have[normQ(r.q)]=1});
+  for(var i=0;i<qs.length;i++){var q=qs[i].slice(0,200),k=normQ(q);if(!k||have[k])continue;have[k]=1;
+    try{await db.collection("research").doc().set({q:q,ctx:"",status:"pending",createdAt:now(),qaId:"",controls:[],auto:true,fromApp:true});added++}catch(e){failWrite(e);break}}
+  msg.textContent=added?added+" added to the research queue.":"All of those were already queued.";if(added)ta.value="";
 }
 function renderEarlier(){
   var inThread={};state.thread.forEach(function(t){if(t.id)inThread[t.id]=1});
@@ -3027,6 +3059,8 @@ document.addEventListener("click",async function(e){
   if(a==="teach-ctl"){var c2=state.controls[fld.sel];go("teach");renderCtlSelect();$("#t-ctl").value=fld.sel||"";$("#t-title").value=c2?c2.name+": ":"";$("#t-title").focus();return}
   if(a==="web"&&it){startResearch(it);return}
   if(a==="later"&&it){startResearch(it,{auto:true});toast("Saved. It gets looked up later.");return}
+  if(a==="sendq"){sendQs();return}
+  if(a==="importq"){importQs();return}
   if(a==="nudge"){nudge(id2);return}
   if(a==="addweb"){addResearch(id2);return}
   if(a==="again"){var rr=resById(id2);if(rr){var holder=state.thread.filter(function(t){return t.rid===id2})[0];var itm=holder||{q:rr.q,ctx:[],controls:rr.controls||[]};if(holder)holder.rid=null;await startResearch(itm)}return}

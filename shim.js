@@ -3,7 +3,8 @@
    optional AI answers with your own Anthropic API key, and web research through the same key. */
 (function(){
 "use strict";
-var APP_VERSION="1.0.2";
+var APP_VERSION="1.0.3";
+window.FC_STANDALONE=true;
 var LS="op1db:",SETK="op1c.settings";
 function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
 function lsSet(k,v){try{localStorage.setItem(k,v);return true}catch(e){return false}}
