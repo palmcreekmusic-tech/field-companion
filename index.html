@@ -2688,7 +2688,7 @@ async function ask(q,opts){
     renderThread();return;
   }
   var ctx=retrieve(q,8);item.ctx=ctx.map(function(x){return x.n.id});
-  if(!sample){item.busy=false;item.offline=true;item.sum=ctx.length?"Here's what your notes say.":"Nothing in your notes matches this yet. Try other words, like the name of a key or a mode.";renderThread();return}
+  if(!sample){item.busy=false;item.offline=true;var weak=weakMatch(q,ctx);item.sum=!ctx.length?"Nothing in your notes covers this yet.":weak?"Your notes don't cover this exactly yet. Here are the closest ones.":"Here's what your notes say.";renderThread();if(weak)startResearch(item,{auto:true});return}
   state.busy=true;state.ctl=new AbortController();setBusy(true);renderThread();
   try{
     var res=await sample.json(buildPrompt(q,ctx),{cache:false,signal:state.ctl.signal});
@@ -2702,12 +2702,22 @@ async function ask(q,opts){
     var used=(Array.isArray(res.cites)?res.cites:[]).map(function(n){return item.ctx[(+n)-1]}).filter(Boolean);
     item.used=used.length?used:item.ctx.slice(0,3);item.busy=false;
     if(db){try{var ref=db.collection("qa").doc();await ref.set({q:q,a:answerText(item),sum:item.sum,steps:item.steps,tip:item.tip,recipe:item.recipe?JSON.parse(JSON.stringify(item.recipe)):null,noteIds:item.ctx,usedIds:item.used,gap:!!item.gap,gapText:item.gap||"",screen:item.screen||"",resolved:false,rating:0,createdAt:now()});item.id=ref.id}catch(e){failWrite(e)}}
+    if(item.gap||!ctx.length)startResearch(item,{auto:true});
     if(!item.recipe&&item.steps.some(function(s){return s.keys.length})&&!reduce)setTimeout(function(){if(state.thread[0]===item)showMe(item.steps,item.screen)},400);
   }catch(e){
     item.busy=false;
     if(!e||e.code!=="cancelled")item.error=errCopy(e&&e.code);else state.thread.shift();
   }finally{state.busy=false;state.ctl=null;setBusy(false);renderThread()}
 }
+/* true when the closest notes miss part of the question */
+function weakMatch(q,ctx){
+  if(!ctx.length)return true;
+  var words=toks(q).filter(function(w){return w.length>2&&!/^(how|what|doe|do|can|the|and|with|use|make|get|op1|field|opfield)$/.test(w)});if(!words.length)return false;
+  var top=ctx.slice(0,3).map(function(x){return noteTok(x.n)}),miss=0;
+  words.forEach(function(w){var alts=[w].concat((SYN[w]||[]).map(stem));if(!top.some(function(t){return alts.some(function(a){return t.title.has(a)||t.tags.has(a)||t.body.has(a)})}))miss++});
+  return miss>0||ctx[0].s<3;
+}
+var LATER_COPY="Saved to look up later. The companion looks it up by itself as soon as AI answers are on (app settings).";
 function setBusy(b){$("#ask-btn").disabled=b;document.querySelectorAll(".qbtn[data-act=quick]").forEach(function(q){q.disabled=b});$("#stop-btn").hidden=!b;$("#ask-hint").textContent=b?"working out the steps…":(sample?"":"AI answers are off (turn them on in app settings), so questions show matching notes.")}
 function srcChips(ids){
   var seen={},h="";
@@ -2771,7 +2781,7 @@ function renderThread(){
 /* ================= web research ================= */
 function resById(id){return state.research.filter(function(r){return r.id===id})[0]}
 function normQ(s){return toks(s).join(" ")}
-function openResearchFor(q){var k=normQ(q);return state.research.filter(function(r){return (r.status==="pending"||r.status==="working")&&normQ(r.q)===k&&now()-(r.createdAt||0)<1800000})[0]}
+function openResearchFor(q){var k=normQ(q);return state.research.filter(function(r){return (r.status==="pending"||(r.status==="working"&&now()-(r.createdAt||0)<1800000))&&normQ(r.q)===k})[0]}
 function fireCopy(c){
   if(c==="needs_reauth")return "Check your API key in app settings, then press start it again.";
   if(["no_mcp","server_not_connected","not_in_manifest","not_granted","capability_disabled","capability_removed","selection_required","blocked_by_policy","approval_required"].indexOf(c)>=0)
@@ -2783,32 +2793,40 @@ async function fireResearch(){
   try{await mcp.callTool(MCPSRV,"fire_trigger",{trigger_id:TRIGGER,text:"Process the pending web research requests now."},{cache:false});return{ok:true}}
   catch(e){return{ok:false,code:(e&&e.code)||"upstream_error"}}
 }
-async function startResearch(item){
-  if(!db){toast("Saving is not available in this view.");return}
+async function startResearch(item,opts){
+  opts=opts||{};
+  if(!db){if(!opts.auto)toast("Saving is not available in this view.");return}
   var ex=openResearchFor(item.q);
   if(ex){item.rid=ex.id;renderThread();return}
   var ctx=(item.ctx||[]).map(function(id){var n=noteById(id);return n?n.title:""}).filter(Boolean).slice(0,6).join("; ");
   var ref=db.collection("research").doc();
-  try{await ref.set({q:item.q,ctx:ctx.slice(0,400),status:"pending",createdAt:now(),qaId:item.id||"",controls:item.controls||[]})}catch(e){failWrite(e);return}
+  try{await ref.set({q:item.q,ctx:ctx.slice(0,400),status:"pending",createdAt:now(),qaId:item.id||"",controls:item.controls||[],auto:true})}catch(e){if(!opts.auto)failWrite(e);return}
   item.rid=ref.id;renderThread();renderWebs();
+  if(!mcp){renderThread();renderWebs();return}
   var r=await fireResearch();
   if(r.ok)delete state.fire[ref.id];else state.fire[ref.id]=fireCopy(r.code);
   renderThread();renderWebs();
 }
 async function nudge(id){var r=await fireResearch();if(r.ok){delete state.fire[id];toast("Search started")}else state.fire[id]=fireCopy(r.code);renderThread();renderWebs()}
-async function addResearch(id){
+var KEEPING={};
+function autoKeep(){
+  if(!db||!state.canWrite)return;
+  state.research.forEach(function(r){if(r.status==="done"&&r.auto&&r.answer&&!r.saved&&!KEEPING[r.id]){KEEPING[r.id]=1;addResearch(r.id,true)}});
+}
+async function addResearch(id,auto){
   var r=resById(id);if(!r||!r.answer||r.saved)return;
   var srcs=(r.sources||[]).map(function(s){return "Source: "+(s.title||"")+" "+(s.url||"")}).join("\n");
   var top=retrieve(r.q,1,state.notes)[0];
   var ctls=(r.controls&&r.controls.length)?r.controls:matchControls(r.q+" "+r.answer.slice(0,300),2);
   var nid=await saveNote({title:String(r.q).replace(/\?+$/,""),body:r.answer+(srcs?"\n\n"+srcs:""),category:top?top.n.category:"tips",tags:toks(r.q).slice(0,6),controls:ctls,source:"web",confidence:r.confidence==="official"?"official":"unverified"});
-  if(nid){try{await db.doc("research/"+id).update({saved:true,noteId:nid})}catch(e){}toast(ctls.length?"Added to the library and linked on the drawing":"Added to the library")}
+  if(nid){try{await db.doc("research/"+id).update({saved:true,noteId:nid})}catch(e){}toast(auto?"Looked up: "+String(r.q).slice(0,60)+" (added to the library)":ctls.length?"Added to the library and linked on the drawing":"Added to the library")}
 }
 function safeUrl(u){return /^https?:\/\//i.test(String(u||""))?String(u):""}
 function webCard(r){
   var st=r.status,h='<div class="web"><p class="label">web search'+(st==="done"&&CONF[r.confidence]?'<span class="badge '+CONF[r.confidence][1]+'">'+CONF[r.confidence][0]+'</span>':"")+'</p>';
   if(st==="pending"||st==="working"){
     var age=now()-(r.createdAt||now()),late=age>600000;
+    if(!mcp)return h+'<p class="wait" style="margin:0">'+esc(LATER_COPY)+'</p></div>';
     h+='<p class="wait" style="margin:0 0 8px">'+(late?"Taking longer than usual. It keeps running in the background, so you can close this page and come back.":st==="working"?"Searching the web now. This usually takes a minute or two.":"Request saved. Waiting for the search to start.")+'</p>';
     if(state.fire[r.id])h+='<p class="gap-line" style="margin:0 0 8px">'+esc(state.fire[r.id])+'</p>';
     if(late||state.fire[r.id]||age>120000)h+='<div class="row"><button type="button" class="btn small" data-act="nudge" data-id="'+esc(r.id)+'">start it again</button></div>';
@@ -2825,9 +2843,9 @@ function webCard(r){
 function webBlock(it,i){
   var r=it.rid&&resById(it.rid);
   if(r)return webCard(r);
-  if(it.rid||it.webOnly)return '<div class="web"><p class="label">web search</p><p class="wait" style="margin:0">Request saved. Waiting for the search to start.</p></div>';
+  if(it.rid||it.webOnly)return '<div class="web"><p class="label">web search</p><p class="wait" style="margin:0">'+(mcp?"Request saved. Waiting for the search to start.":esc(LATER_COPY))+'</p></div>';
   if(it.busy||(!it.sum&&!it.offline&&!it.error))return "";
-  if(it.offline||!sample)return "";
+  if(it.offline||!sample)return it.busy||!db?"":'<div class="row" style="margin-top:10px"><button type="button" class="btn small" data-act="later" data-i="'+i+'">not what you needed? save it to look up later</button></div>';
   var weak=it.gap||!(it.ctx&&it.ctx.length);
   if(!weak||it.repeat)return "";
   var msg=it.gap?"Your notes are missing part of this.":it.offline?"AI answers are off, so it couldn't write an answer.":"Nothing in your notes matches this.";
@@ -2838,7 +2856,7 @@ function renderWebs(){
   var rows=state.research.filter(function(r){return !attached[r.id]}).slice(0,20);
   $("#webs").innerHTML=rows.length?'<p class="label">web searches</p>'+rows.map(function(r){
     var live=r.status==="pending"||r.status==="working";
-    return '<details class="item" data-web="'+esc(r.id)+'"'+(state.earlierOpen["w"+r.id]||live?" open":"")+'><summary><span class="t">'+esc(r.q)+'</span><span class="badge'+(r.status==="failed"?" warn":r.status==="done"?" good":"")+'">'+(live?"searching":r.status==="done"?"answered":"failed")+'</span></summary><div class="body">'+webCard(r).replace('<div class="web">','<div>')+'</div></details>';
+    return '<details class="item" data-web="'+esc(r.id)+'"'+(state.earlierOpen["w"+r.id]||live?" open":"")+'><summary><span class="t">'+esc(r.q)+'</span><span class="badge'+(r.status==="failed"?" warn":r.status==="done"?" good":"")+'">'+(live?(mcp?"searching":"saved for later"):r.status==="done"?"answered":"failed")+'</span></summary><div class="body">'+webCard(r).replace('<div class="web">','<div>')+'</div></details>';
   }).join(""):"";
 }
 function renderEarlier(){
@@ -3008,6 +3026,7 @@ document.addEventListener("click",async function(e){
   if(a==="combo"){if(state.tab!=="field")go("field");stopWalk(true);var x=comboAt(b),cid=b.getAttribute("data-c");if(!x)return;var ids=comboIds(x.keys).filter(function(k){return BOX[k]});var primary=ids.indexOf(cid)>=0?cid:ids[0];if(!primary)return;fld.sel=primary;fld.note=null;fld.pin=ids.filter(function(k){return k!==primary});fld.zoomed=primary;markSvg();zoomTo(boxFor(ids));$("#stage").scrollIntoView({behavior:reduce?"auto":"smooth",block:"start"});return}
   if(a==="teach-ctl"){var c2=state.controls[fld.sel];go("teach");renderCtlSelect();$("#t-ctl").value=fld.sel||"";$("#t-title").value=c2?c2.name+": ":"";$("#t-title").focus();return}
   if(a==="web"&&it){startResearch(it);return}
+  if(a==="later"&&it){startResearch(it,{auto:true});toast("Saved. It gets looked up later.");return}
   if(a==="nudge"){nudge(id2);return}
   if(a==="addweb"){addResearch(id2);return}
   if(a==="again"){var rr=resById(id2);if(rr){var holder=state.thread.filter(function(t){return t.rid===id2})[0];var itm=holder||{q:rr.q,ctx:[],controls:rr.controls||[]};if(holder)holder.rid=null;await startResearch(itm)}return}
@@ -3085,7 +3104,7 @@ buildDevice();setSound(sndOn,true);setTab(state.tab);renderAll();renderPlayBar()
   db.collection("controls").onSnapshot(function(s){var m={};s.docs.forEach(function(d){m[d.id]=d.data()});state.controls=m;state.ctlLoaded=true;renderCtlSelect();renderField();renderCmds();renderThread()},function(){state.ctlLoaded=true;renderField()});
   db.collection("notes").onSnapshot(function(s){state.notes=s.docs.map(function(d){return Object.assign({id:d.id},d.data())});renderStatus();renderLib();renderThread();renderField();renderTips()},function(){});
   db.collection("qa").orderBy("createdAt","desc").limit(200).onSnapshot(function(s){state.qa=s.docs.map(function(d){return Object.assign({id:d.id},d.data())});renderEarlier();renderGaps();renderThread()},function(){});
-  db.collection("research").orderBy("createdAt","desc").limit(50).onSnapshot(function(s){state.research=s.docs.map(function(d){return Object.assign({id:d.id},d.data())});renderThread();renderWebs()},function(){});
+  db.collection("research").orderBy("createdAt","desc").limit(50).onSnapshot(function(s){state.research=s.docs.map(function(d){return Object.assign({id:d.id},d.data())});renderThread();renderWebs();autoKeep()},function(){});
   db.collection("recipes").orderBy("createdAt","desc").limit(300).onSnapshot(function(s){state.recipes=s.docs.map(function(d){return Object.assign({id:d.id},d.data())});renderLab()},function(){});
   db.doc("meta/info").onSnapshot(function(s){state.meta=s.exists?s.data():null;renderStatus()},function(){});
 })();

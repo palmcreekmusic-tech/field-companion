@@ -3,7 +3,7 @@
    optional AI answers with your own Anthropic API key, and web research through the same key. */
 (function(){
 "use strict";
-var APP_VERSION="1.0.1";
+var APP_VERSION="1.0.2";
 var LS="op1db:",SETK="op1c.settings";
 function lsGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
 function lsSet(k,v){try{localStorage.setItem(k,v);return true}catch(e){return false}}
@@ -70,10 +70,10 @@ var researching=false;
 async function runResearch(){
   if(researching)return;researching=true;
   try{
-    var c=load("research"),ids=Object.keys(c).filter(function(id){return c[id].status==="pending"});
+    var c=load("research"),ids=Object.keys(c).filter(function(id){var r=c[id];return r.status==="pending"||(r.status==="working"&&Date.now()-(r.startedAt||r.createdAt||0)>600000)});
     var ctlIds=Object.keys(load("controls")).join(", ");
     for(var i=0;i<ids.length;i++){
-      var id=ids[i],r=c[id];await db.doc("research/"+id).update({status:"working"});
+      var id=ids[i],r=c[id];await db.doc("research/"+id).update({status:"working",startedAt:Date.now()});
       try{
         var p="You research questions about the Teenage Engineering OP-1 Field (the 2022 model, not the original OP-1). Search the web, prefer teenage.engineering, then reputable forums and reviews.\n\nQuestion: "+r.q+(r.ctx?"\nWhat the owner's notes already cover: "+r.ctx:"")+"\n\nReply with only one JSON object: {\"answer\": \"a short plain-language answer in markdown, with steps if it is a how-to\", \"sources\": [{\"title\": \"...\", \"url\": \"https://...\"}], \"confidence\": \"official\" if it comes from teenage engineering, otherwise \"unverified\", \"controls\": [up to 3 key ids from: "+ctlIds+"]}";
         var out=await callClaude(p,{tools:[{type:"web_search_20250305",name:"web_search",max_uses:5}],max:6000});
@@ -83,6 +83,8 @@ async function runResearch(){
     }
   }finally{researching=false}
 }
+/* questions saved while AI answers were off get looked up as soon as they are on */
+if(aiOn())seedReady.then(function(){setTimeout(runResearch,3000)});
 var mcp={callTool:function(server,tool){if(tool==="fire_trigger"){runResearch();return Promise.resolve({})}return Promise.reject({code:"not_in_manifest"})}};
 
 window.claude={use:async function(name){
